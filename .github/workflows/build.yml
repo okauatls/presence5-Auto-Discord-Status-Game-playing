@@ -1,0 +1,18 @@
+name: build
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y bash clang-15 lld-15 make unzip wget
+      - run: |
+          wget -q https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip
+          sudo unzip -q -d /opt ps5-payload-sdk.zip
+      - run: make -C payload
+        env:
+          PS5_PAYLOAD_SDK: /opt/ps5-payload-sdk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: presence-elf
+          path: payload/presence.elf
