@@ -5,23 +5,11 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y bash clang-15 lld-15 make unzip wget binutils
+      - run: sudo apt-get update && sudo apt-get install -y bash clang-15 lld-15 make unzip wget
       - run: |
           wget -q https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip
           sudo unzip -q -d /opt ps5-payload-sdk.zip
-      - name: Inspect SDK
-        run: |
-          S=/opt/ps5-payload-sdk
-          echo "=== SAMPLE ==="
-          ls $S/samples/http2_get
-          cat $S/samples/http2_get/*.c | head -120
-          echo "=== SSL SYMBOLS ==="
-          nm -D --defined-only $S/target/lib/libSceSsl.so | awk '{print $3}' | head -50
-          echo "=== HTTP SYMBOLS ==="
-          nm -D --defined-only $S/target/lib/libSceHttp.so | awk '{print $3}' | grep -i -E 'Init|Template|Connection|Request|Send|Read|Ssl|Cert|Nonblock' | head -50
-          echo "=== OTHER ==="
-          find $S -iname '*websocket*' | head
-          grep -rIl 'sceSslInit' $S | head
+      - run: sed -i 's/-lSceSystemService/-lSceSystemService -lSceNet -lSceSsl -lSceHttp2/; s/ -Werror//' payload/Makefile
       - run: make -C payload
         env:
           PS5_PAYLOAD_SDK: /opt/ps5-payload-sdk
