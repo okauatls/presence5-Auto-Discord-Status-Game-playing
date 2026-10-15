@@ -23,6 +23,7 @@ int sceHttp2AddRequestHeader(int, const char*, const char*, uint32_t);
 int sceHttp2SendRequest(int, const void*, size_t);
 int sceHttp2GetStatusCode(int, int*);
 int sceHttp2DeleteRequest(int);
+int sceHttp2SslDisableOption(int, uint32_t) __attribute__((weak));
 
 #define URL "https://discord.com/api/v9/users/@me/settings"
 #define UA "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
@@ -54,6 +55,7 @@ static int net_init(void) {
     if ((ssl = sceSslInit(256*1024)) < 0) return -3;
     if ((http = sceHttp2Init(mem, ssl, 256*1024, 1)) < 0) return -4;
     if ((g_tmpl = sceHttp2CreateTemplate(http, UA, 3, 1)) < 0) return -5;
+    if (sceHttp2SslDisableOption) sceHttp2SslDisableOption(g_tmpl, 0xFF);
     return 0;
 }
 
@@ -96,8 +98,11 @@ static int set_status(const char* name) {
     sceHttp2AddRequestHeader(req, "Authorization", g_token, 0);
     sceHttp2AddRequestHeader(req, "Content-Type", "application/json", 0);
     int status = -1;
-    if (sceHttp2SendRequest(req, body, strlen(body)) == 0) {
+    int sr = sceHttp2SendRequest(req, body, strlen(body));
+    if (sr == 0) {
         if (sceHttp2GetStatusCode(req, &status)) status = -2;
+    } else {
+        status = sr;
     }
     sceHttp2DeleteRequest(req);
     return status;
@@ -107,7 +112,7 @@ int main(void) {
     if (load_token()) { notify("Discord: falta /data/discord_token.txt"); return 1; }
     int r = net_init();
     if (r) { char m[64]; snprintf(m, sizeof m, "Discord: erro de rede %d", r); notify(m); return 1; }
-    notify("Discord status: iniciado");
+    notify(sceHttp2SslDisableOption ? "Discord status: iniciado (ssl off)" : "Discord status: iniciado (sem ssl off)");
 
     char cur[32] = "";
     for (;;) {
@@ -125,7 +130,7 @@ int main(void) {
             } else {
                 st = set_status(NULL);
             }
-            snprintf(msg, sizeof msg, "Discord: %s (HTTP %d)", cur[0] ? name : "status limpo", st);
+            snprintf(msg, sizeof msg, "Discord: %s (%d / 0x%x)", cur[0] ? name : "status limpo", st, (unsigned)st);
             notify(msg);
         }
         sleep(5);
