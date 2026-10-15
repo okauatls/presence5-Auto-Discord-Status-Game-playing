@@ -25,10 +25,11 @@ int sceHttp2GetStatusCode(int, int*);
 int sceHttp2DeleteRequest(int);
 int sceHttp2SslDisableOption(int, uint32_t) __attribute__((weak));
 
-#define URL "https://discord.com/api/v9/users/@me/settings"
+#define API "https://discord.com/api/v9/users/@me"
 #define UA "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 static int g_tmpl = -1;
+static int g_ssl_rc = 0;
 static char g_token[256];
 
 static void notify(const char* m) {
@@ -55,7 +56,7 @@ static int net_init(void) {
     if ((ssl = sceSslInit(256*1024)) < 0) return -3;
     if ((http = sceHttp2Init(mem, ssl, 256*1024, 1)) < 0) return -4;
     if ((g_tmpl = sceHttp2CreateTemplate(http, UA, 3, 1)) < 0) return -5;
-    if (sceHttp2SslDisableOption) sceHttp2SslDisableOption(g_tmpl, 0xFF);
+    g_ssl_rc = sceHttp2SslDisableOption ? sceHttp2SslDisableOption(g_tmpl, 0xFF) : 0x7777;
     return 0;
 }
 
@@ -85,34 +86,46 @@ static int get_name(const char* tid, char* out, size_t n) {
     return i ? 0 : -1;
 }
 
-static int set_status(const char* name) {
+static int do_req(const char* method, const char* url, const char* body, char* out, size_t n) {
+    size_t bl = body ? strlen(body) : 0;
+    int req = sceHttp2CreateRequestWithURL(g_tmpl, method, url, bl);
+    if (req < 0) { snprintf(out, n, "%s create=%x", method, (unsigned)req); return -1; }
+    int ah = sceHttp2AddRequestHeader(req, "Authorization", g_token, 0);
+    if (body) sceHttp2AddRequestHeader(req, "Content-Type", "application/json", 0);
+    int sr = sceHttp2SendRequest(req, body, bl);
+    int status = -1;
+    if (sr == 0) sceHttp2GetStatusCode(req, &status);
+    snprintf(out, n, "%s: hdr=%x send=%x st=%d", method, (unsigned)ah, (unsigned)sr, status);
+    sceHttp2DeleteRequest(req);
+    return status;
+}
+
+static int set_status(const char* name, char* out, size_t n) {
     char body[512];
     if (name)
         snprintf(body, sizeof body,
                  "{\"custom_status\":{\"text\":\"Jogando %s\",\"emoji_name\":\"🎮\"}}", name);
     else
         snprintf(body, sizeof body, "{\"custom_status\":null}");
-
-    int req = sceHttp2CreateRequestWithURL(g_tmpl, "PATCH", URL, strlen(body));
-    if (req < 0) return req;
-    sceHttp2AddRequestHeader(req, "Authorization", g_token, 0);
-    sceHttp2AddRequestHeader(req, "Content-Type", "application/json", 0);
-    int status = -1;
-    int sr = sceHttp2SendRequest(req, body, strlen(body));
-    if (sr == 0) {
-        if (sceHttp2GetStatusCode(req, &status)) status = -2;
-    } else {
-        status = sr;
-    }
-    sceHttp2DeleteRequest(req);
-    return status;
+    return do_req("PATCH", API "/settings", body, out, n);
 }
 
 int main(void) {
     if (load_token()) { notify("Discord: falta /data/discord_token.txt"); return 1; }
     int r = net_init();
     if (r) { char m[64]; snprintf(m, sizeof m, "Discord: erro de rede %d", r); notify(m); return 1; }
-    notify(sceHttp2SslDisableOption ? "Discord status: iniciado (ssl off)" : "Discord status: iniciado (sem ssl off)");
+
+    char msg[300], res[200];
+    snprintf(msg, sizeof msg, "Discord: iniciado, ssl=%x", (unsigned)g_ssl_rc);
+    notify(msg);
+
+    do_req("GET", API, NULL, res, sizeof res);
+    snprintf(msg, sizeof msg, "TESTE %s", res);
+    notify(msg);
+
+    set_status(NULL, res, sizeof res);
+    snprintf(msg, sizeof msg, "TESTE %s", res);
+    notify(msg);
 
     char cur[32] = "";
     for (;;) {
@@ -122,15 +135,14 @@ int main(void) {
 
         if (strcmp(seen, cur) != 0) {
             strcpy(cur, seen);
-            char name[128] = "", msg[200];
-            int st;
+            char name[128] = "";
             if (cur[0]) {
                 if (get_name(cur, name, sizeof name)) snprintf(name, sizeof name, "%s", cur);
-                st = set_status(name);
+                set_status(name, res, sizeof res);
             } else {
-                st = set_status(NULL);
+                set_status(NULL, res, sizeof res);
             }
-            snprintf(msg, sizeof msg, "Discord: %s (%d / 0x%x)", cur[0] ? name : "status limpo", st, (unsigned)st);
+            snprintf(msg, sizeof msg, "%s | %s", cur[0] ? name : "limpo", res);
             notify(msg);
         }
         sleep(5);
