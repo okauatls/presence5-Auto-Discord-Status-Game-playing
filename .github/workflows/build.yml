@@ -5,12 +5,21 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y bash clang-15 lld-15 make unzip wget
+      - run: sudo apt-get update && sudo apt-get install -y bash clang-15 lld-15 make unzip wget bzip2
       - run: |
           wget -q https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip
           sudo unzip -q -d /opt ps5-payload-sdk.zip
-      - run: sed -i 's/-lSceSystemService/-lSceSystemService -lSceNet -lSceSsl -lSceHttp2 -lSceHttp/; s/ -Werror//' payload/Makefile
-      - run: make -C payload
+      - run: |
+          wget -q https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.2/mbedtls-3.6.2.tar.bz2
+          tar xjf mbedtls-3.6.2.tar.bz2
+          mv mbedtls-3.6.2 mbedtls
+      - name: Build
+        run: |
+          SRC=$(ls mbedtls/library/*.c | grep -v -E 'net_sockets|timing')
+          /opt/ps5-payload-sdk/bin/prospero-clang -O2 -w -Imbedtls/include -Imbedtls/library \
+            -DMBEDTLS_NO_PLATFORM_ENTROPY -DMBEDTLS_ENTROPY_HARDWARE_ALT \
+            -o payload/presence.elf payload/server.c $SRC \
+            -lSceSystemService -lSceNet
         env:
           PS5_PAYLOAD_SDK: /opt/ps5-payload-sdk
       - uses: actions/upload-artifact@v4
