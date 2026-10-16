@@ -3,9 +3,11 @@
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
+#include <ctype.h>
 #include <time.h>
 #include <unistd.h>
 #include <poll.h>
+#include <dirent.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -31,9 +33,10 @@ int sceNetResolverCreate(const char*, int, int) __attribute__((weak));
 int sceNetResolverStartNtoa(int, const char*, uint32_t*, int, int, int) __attribute__((weak));
 int sceNetResolverDestroy(int) __attribute__((weak));
 
-#define HOST "gateway.discord.gg"
+#define GW "gateway.discord.gg"
 
 static char g_token[256], g_cur[32], g_name[128], g_last[160];
+static char g_appid[40], g_asset[320], g_cover_for[32];
 static time_t g_start;
 static int g_fd = -1, g_err = 0, g_to = 200, g_pool = -1, g_inited = 0;
 static mbedtls_ssl_context ssl;
@@ -85,6 +88,16 @@ static int load_token(void) {
     size_t n = strlen(g_token);
     while (n && (g_token[n-1] == '\n' || g_token[n-1] == '\r' || g_token[n-1] == ' ')) g_token[--n] = 0;
     return n > 20 ? 0 : -1;
+}
+
+static int read_appid(void) {
+    FILE* f = fopen("/data/discord_appid.txt", "r");
+    if (!f) return -1;
+    if (!fgets(g_appid, sizeof g_appid, f)) { fclose(f); return -1; }
+    fclose(f);
+    size_t n = strlen(g_appid);
+    while (n && (g_appid[n-1] < '0' || g_appid[n-1] > '9')) g_appid[--n] = 0;
+    return n >= 15 ? 0 : (g_appid[0] = 0, -1);
 }
 
 static int get_name(const char* tid, char* out, size_t n) {
@@ -148,9 +161,9 @@ static int resolve(const char* host, uint32_t* addr) {
     return -1;
 }
 
-static int tcp_open(void) {
+static int tcp_open(const char* host) {
     uint32_t a;
-    if (resolve(HOST, &a)) return -1;
+    if (resolve(host, &a)) return -1;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -2;
     struct sockaddr_in sa;
@@ -188,7 +201,7 @@ static void tls_close(void) {
     if (g_fd >= 0) { close(g_fd); g_fd = -1; }
 }
 
-static int tls_open(void) {
+static int tls_open(const char* host) {
     mbedtls_ssl_init(&ssl);
     mbedtls_ssl_config_init(&conf);
     g_inited = 1;
@@ -197,7 +210,7 @@ static int tls_open(void) {
     mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &drbg);
     mbedtls_ssl_conf_max_tls_version(&conf, MBEDTLS_SSL_VERSION_TLS1_2);
     if (mbedtls_ssl_setup(&ssl, &conf)) return -12;
-    mbedtls_ssl_set_hostname(&ssl, HOST);
+    mbedtls_ssl_set_hostname(&ssl, host);
     mbedtls_ssl_set_bio(&ssl, NULL, bio_send, bio_recv, NULL);
     g_to = 1000;
     int r = 0;
@@ -238,6 +251,157 @@ static int rd(unsigned char* b, size_t n, int ms) {
     return 1;
 }
 
+/* requisicao HTTPS simples (HTTP/1.0, resposta ate fechar a conexao) */
+static int https_req(const char* host, const char* req, size_t rl, char* resp, size_t rsz) {
+    resp[0] = 0;
+    if (tcp_open(host)) return -1;
+    if (tls_open(host)) { tls_close(); return -2; }
+    if (tls_write_all((const unsigned char*)req, rl)) { tls_close(); return -3; }
+    size_t o = 0; int waited = 0;
+    while (o < rsz - 1) {
+        int n = mbedtls_ssl_read(&ssl, (unsigned char*)resp + o, rsz - 1 - o);
+        if (n > 0) { o += n; waited = 0; continue; }
+        if (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            waited += g_to;
+            if (waited >= 8000) break;
+            continue;
+        }
+        break;
+    }
+    resp[o] = 0;
+    tls_close();
+    return (int)o;
+}
+
+static int http_status(const char* resp) {
+    int st = 0;
+    sscanf(resp, "HTTP/%*s %d", &st);
+    return st;
+}
+
+static void urlenc(const char* s, char* o, size_t n) {
+    static const char* hex = "0123456789ABCDEF";
+    size_t j = 0;
+    for (size_t i = 0; s[i] && j + 4 < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == 0xE2 && (unsigned char)s[i+1] == 0x84 && (unsigned char)s[i+2] == 0xA2) { i += 2; continue; }
+        if (c == 0xC2 && (unsigned char)s[i+1] == 0xAE) { i += 1; continue; }
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') o[j++] = (char)c;
+        else if (c == ' ') o[j++] = '+';
+        else { o[j++] = '%'; o[j++] = hex[c >> 4]; o[j++] = hex[c & 15]; }
+    }
+    o[j] = 0;
+}
+
+static int wiki_url(const char* name, char* out, size_t on) {
+    char q[300], enc[400], req[800], resp[6144];
+    out[0] = 0;
+    snprintf(q, sizeof q, "%s video game", name);
+    urlenc(q, enc, sizeof enc);
+    int n = snprintf(req, sizeof req,
+        "GET /w/api.php?action=query&generator=search&gsrsearch=%s&gsrlimit=1&prop=pageimages&piprop=thumbnail&pithumbsize=512&format=json HTTP/1.0\r\n"
+        "Host: en.wikipedia.org\r\nUser-Agent: ps5-presence/1.0\r\nAccept: application/json\r\n\r\n", enc);
+    https_req("en.wikipedia.org", req, n, resp, sizeof resp);
+    int st = http_status(resp);
+    char* p = strstr(resp, "\"source\":\"");
+    if (p) {
+        p += 10;
+        size_t j = 0;
+        while (*p && *p != '"' && j < on - 1) {
+            if (*p == '\\' && p[1] == '/') p++;
+            out[j++] = *p++;
+        }
+        out[j] = 0;
+    }
+    return st;
+}
+
+static int register_asset(const char* url) {
+    char body[600], req[1300], resp[3000];
+    g_asset[0] = 0;
+    int bl = snprintf(body, sizeof body, "{\"urls\":[\"%s\"]}", url);
+    int n = snprintf(req, sizeof req,
+        "POST /api/v9/applications/%s/external-assets HTTP/1.0\r\nHost: discord.com\r\nAuthorization: %s\r\n"
+        "Content-Type: application/json\r\nContent-Length: %d\r\nUser-Agent: Mozilla/5.0\r\n\r\n%s",
+        g_appid, g_token, bl, body);
+    https_req("discord.com", req, n, resp, sizeof resp);
+    int st = http_status(resp);
+    char* p = strstr(resp, "\"external_asset_path\":\"");
+    if (p) {
+        p += 23;
+        strcpy(g_asset, "mp:");
+        size_t j = 3;
+        while (*p && *p != '"' && j < sizeof g_asset - 1) g_asset[j++] = *p++;
+        g_asset[j] = 0;
+    }
+    return st;
+}
+
+static int load_override(const char* tid, char* url, size_t un, char* name, size_t nn) {
+    FILE* f = fopen("/data/discord_covers.txt", "r");
+    if (!f) return 0;
+    char line[700];
+    int found = 0;
+    while (fgets(line, sizeof line, f)) {
+        size_t L = strlen(line);
+        while (L && (line[L-1] == '\n' || line[L-1] == '\r' || line[L-1] == ' ')) line[--L] = 0;
+        char* bar = strchr(line, '|');
+        if (!bar) continue;
+        *bar = 0;
+        if (strcmp(line, tid)) continue;
+        char* u = bar + 1;
+        char* bar2 = strchr(u, '|');
+        if (bar2) {
+            *bar2 = 0;
+            snprintf(name, nn, "%s", bar2 + 1);
+            for (char* c = name; *c; c++) if (*c == '"' || *c == '\\') *c = ' ';
+        }
+        snprintf(url, un, "%s", u);
+        found = 1;
+        break;
+    }
+    fclose(f);
+    return found;
+}
+
+static void list_dir(const char* path, char* out, size_t n) {
+    size_t l = strlen(out);
+    DIR* d = opendir(path);
+    if (!d) { snprintf(out + l, n - l, " [%s: x]", path); return; }
+    l += snprintf(out + l, n - l, " [%s:", path);
+    struct dirent* e;
+    int c = 0;
+    while ((e = readdir(d)) && c < 12) {
+        if (e->d_name[0] == '.') continue;
+        l += snprintf(out + l, n - l, " %s", e->d_name);
+        c++;
+    }
+    closedir(d);
+    snprintf(out + strlen(out), n - strlen(out), "]");
+}
+
+static void prepare_cover(void) {
+    char url[400] = "", nm[128] = "", msg[500], path[96];
+    strcpy(g_cover_for, g_cur);
+    g_asset[0] = 0;
+    int ov = load_override(g_cur, url, sizeof url, nm, sizeof nm);
+    if (nm[0]) snprintf(g_name, sizeof g_name, "%s", nm);
+    if (!ov && !strcmp(g_name, g_cur)) {
+        snprintf(msg, sizeof msg, "DIR %s", g_cur);
+        snprintf(path, sizeof path, "/user/appmeta/%s", g_cur);
+        list_dir(path, msg, sizeof msg);
+        snprintf(path, sizeof path, "/system_data/priv/appmeta/%s", g_cur);
+        list_dir(path, msg, sizeof msg);
+        notify(msg);
+    }
+    if (!g_appid[0]) return;
+    int wst = -1, dst = -1;
+    if (!url[0]) wst = wiki_url(g_name, url, sizeof url);
+    if (url[0]) dst = register_asset(url);
+    snprintf(msg, sizeof msg, "Capa %s: wiki=%d discord=%d %s", g_name, wst, dst, g_asset[0] ? "ok" : "sem capa");
+    notify(msg);
+}
+
 static int ws_upgrade(void) {
     unsigned char k[16];
     mbedtls_ctr_drbg_random(&drbg, k, 16);
@@ -247,7 +411,7 @@ static int ws_upgrade(void) {
     char req[512];
     int n = snprintf(req, sizeof req,
         "GET /?v=10&encoding=json HTTP/1.1\r\nHost: %s\r\nUser-Agent: Mozilla/5.0\r\nUpgrade: websocket\r\n"
-        "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", HOST, b64);
+        "Connection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n", GW, b64);
     if (tls_write_all((unsigned char*)req, n)) return -1;
     char resp[1024]; size_t o = 0;
     while (o < sizeof resp - 1) {
@@ -273,7 +437,6 @@ static int ws_send(int op, const char* p, size_t n) {
     return tls_write_all(buf, h + n);
 }
 
-/* 1 = frame lido, 0 = nada (ocioso), -1 = erro */
 static int ws_recv(char* head, size_t hsz, int* op, size_t* plen) {
     unsigned char h[2], tmp[1024];
     int r = rd(h, 1, 200);
@@ -306,18 +469,24 @@ static long json_num(const char* s, const char* key) {
 
 static void act_json(char* out, size_t n) {
     if (!g_cur[0]) { snprintf(out, n, "[]"); return; }
-    snprintf(out, n, "[{\"name\":\"%s\",\"type\":0,\"timestamps\":{\"start\":%lld}}]", g_name, (long long)g_start * 1000);
+    if (g_asset[0] && g_appid[0] && !strcmp(g_cover_for, g_cur))
+        snprintf(out, n,
+            "[{\"name\":\"%s\",\"type\":0,\"application_id\":\"%s\",\"timestamps\":{\"start\":%lld},"
+            "\"assets\":{\"large_image\":\"%s\",\"large_text\":\"%s\"}}]",
+            g_name, g_appid, (long long)g_start * 1000, g_asset, g_name);
+    else
+        snprintf(out, n, "[{\"name\":\"%s\",\"type\":0,\"timestamps\":{\"start\":%lld}}]", g_name, (long long)g_start * 1000);
 }
 
 static int send_presence(void) {
-    char a[400], b[900];
+    char a[900], b[1300];
     act_json(a, sizeof a);
     snprintf(b, sizeof b, "{\"op\":3,\"d\":{\"since\":0,\"activities\":%s,\"status\":\"online\",\"afk\":false}}", a);
     return ws_send(1, b, strlen(b));
 }
 
 static int send_identify(void) {
-    char a[400], b[1800];
+    char a[900], b[2200];
     act_json(a, sizeof a);
     snprintf(b, sizeof b,
         "{\"op\":2,\"d\":{\"token\":\"%s\",\"properties\":{\"os\":\"Windows\",\"browser\":\"Chrome\",\"device\":\"\"},"
@@ -327,8 +496,9 @@ static int send_identify(void) {
 
 static int session(void) {
     int r;
-    if ((r = tcp_open())) { report("conexao", r); return -1; }
-    if ((r = tls_open())) { report("tls", r); tls_close(); return -1; }
+    if (g_cur[0] && strcmp(g_cover_for, g_cur)) prepare_cover();
+    if ((r = tcp_open(GW))) { report("conexao", r); return -1; }
+    if ((r = tls_open(GW))) { report("tls", r); tls_close(); return -1; }
     if ((r = ws_upgrade())) { report("websocket", r); tls_close(); return -1; }
 
     char head[512]; int op; size_t len;
@@ -376,9 +546,8 @@ static int session(void) {
             lastpoll = now;
             poll_game();
             if (strcmp(g_cur, sent)) {
-                strcpy(sent, g_cur);
-                send_presence();
-                if (!g_cur[0]) { ws_send(8, "\x03\xe8", 2); break; }
+                if (!g_cur[0]) { send_presence(); ws_send(8, "\x03\xe8", 2); }
+                break;
             }
         }
     }
@@ -388,13 +557,14 @@ static int session(void) {
 
 int main(void) {
     while (load_token()) sleep(15);
+    read_appid();
     if (sceNetInit) sceNetInit();
     if (sceNetPoolCreate) g_pool = sceNetPoolCreate("rpcpool", 64 * 1024, 0);
     psa_crypto_init();
     mbedtls_entropy_init(&ent);
     mbedtls_ctr_drbg_init(&drbg);
     if (mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &ent, (const unsigned char*)"rpc", 3)) { notify("RPC erro: rng"); return 1; }
-    notify("Discord RPC: iniciado");
+    notify(g_appid[0] ? "Discord RPC: iniciado (com capa)" : "Discord RPC: iniciado (sem appid)");
 
     for (;;) {
         poll_game();
