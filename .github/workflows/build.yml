@@ -10,6 +10,7 @@ jobs:
           wget -q https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip
           sudo unzip -q -d /opt ps5-payload-sdk.zip
       - run: sed -i 's/-lSceSystemService/-lSceSystemService -lSceNet -lSceSsl -lSceHttp2 -lSceHttp/; s/ -Werror//' payload/Makefile
+      - run: make -C payload
         env:
           PS5_PAYLOAD_SDK: /opt/ps5-payload-sdk
       - uses: actions/upload-artifact@v4
