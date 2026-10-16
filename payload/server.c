@@ -100,7 +100,7 @@ static int read_appid(void) {
     return n >= 15 ? 0 : (g_appid[0] = 0, -1);
 }
 
-static int get_name(const char* tid, char* out, size_t n) {
+static int get_name_json(const char* tid, char* out, size_t n) {
     char path[128], buf[16384];
     snprintf(path, sizeof path, "/user/appmeta/%s/param.json", tid);
     FILE* f = fopen(path, "rb");
@@ -126,6 +126,42 @@ static int get_name(const char* tid, char* out, size_t n) {
     return i ? 0 : -1;
 }
 
+static int get_name_sfo(const char* tid, char* out, size_t n) {
+    static unsigned char buf[32768];
+    char path[128];
+    snprintf(path, sizeof path, "/system_data/priv/appmeta/%s/param.sfo", tid);
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    size_t len = fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    if (len < 20 || buf[0] != 0 || buf[1] != 'P' || buf[2] != 'S' || buf[3] != 'F') return -1;
+    uint32_t kt = buf[8] | (buf[9] << 8) | (buf[10] << 16) | ((uint32_t)buf[11] << 24);
+    uint32_t dt = buf[12] | (buf[13] << 8) | (buf[14] << 16) | ((uint32_t)buf[15] << 24);
+    uint32_t cnt = buf[16] | (buf[17] << 8) | (buf[18] << 16) | ((uint32_t)buf[19] << 24);
+    for (uint32_t i = 0; i < cnt && 20 + (size_t)(i + 1) * 16 <= len; i++) {
+        unsigned char* e = buf + 20 + (size_t)i * 16;
+        uint32_t ko = e[0] | (e[1] << 8);
+        uint32_t dl = e[4] | (e[5] << 8) | (e[6] << 16) | ((uint32_t)e[7] << 24);
+        uint32_t doff = e[12] | (e[13] << 8) | (e[14] << 16) | ((uint32_t)e[15] << 24);
+        if ((size_t)kt + ko + 6 > len) continue;
+        if (strcmp((char*)buf + kt + ko, "TITLE")) continue;
+        size_t k = 0;
+        for (uint32_t j = 0; j < dl && (size_t)dt + doff + j < len && k < n - 1 && k < 100; j++) {
+            unsigned char c = buf[dt + doff + j];
+            if (!c) break;
+            if (c == '"' || c == '\\' || c < 0x20) c = ' ';
+            out[k++] = (char)c;
+        }
+        out[k] = 0;
+        return k ? 0 : -1;
+    }
+    return -1;
+}
+
+static int get_name(const char* tid, char* out, size_t n) {
+    if (get_name_json(tid, out, n) == 0) return 0;
+    return get_name_sfo(tid, out, n);
+}
 static void poll_game(void) {
     char seen[32] = "";
     int id = sceSystemServiceGetAppIdOfRunningBigApp();
