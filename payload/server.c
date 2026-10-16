@@ -16,19 +16,29 @@ int sceSystemServiceGetAppTitleId(int, char*);
 int sceNetInit(void);
 int sceNetPoolCreate(const char*, int, int);
 int sceSslInit(size_t);
+
 int sceHttp2Init(int, int, size_t, int);
 int sceHttp2CreateTemplate(int, const char*, int, int);
 int sceHttp2CreateRequestWithURL(int, const char*, const char*, uint64_t);
-int sceHttp2AddRequestHeader(int, const char*, const char*, uint32_t);
 int sceHttp2SendRequest(int, const void*, size_t);
 int sceHttp2GetStatusCode(int, int*);
 int sceHttp2DeleteRequest(int);
-int sceHttp2SslDisableOption(int, uint32_t) __attribute__((weak));
+
+int sceHttpInit(int, int, size_t);
+int sceHttpCreateTemplate(int, const char*, int, int);
+int sceHttpCreateConnectionWithURL(int, const char*, int);
+int sceHttpCreateRequestWithURL2(int, const char*, const char*, uint64_t);
+int sceHttpAddRequestHeader(int, const char*, const char*, uint32_t);
+int sceHttpSendRequest(int, const void*, size_t);
+int sceHttpDeleteRequest(int);
+int sceHttpDeleteConnection(int);
+int sceHttpGetStatusCode(int, int*) __attribute__((weak));
+int sceHttpsSetSslCallback(int, int (*)(int, unsigned int, void* const*, int, void*), void*);
 
 #define API "https://discord.com/api/v9/users/@me"
 #define UA "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
-static int g_tmpl = -1;
+static int g_t2 = -1, g_t1 = -1;
 static char g_token[256];
 
 static void notify(const char* m) {
@@ -48,13 +58,21 @@ static int load_token(void) {
     return n > 20 ? 0 : -1;
 }
 
+static int ssl_cb(int id, unsigned int err, void* const* certs, int n, void* arg) {
+    (void)id; (void)err; (void)certs; (void)n; (void)arg;
+    return 0;
+}
+
 static int net_init(void) {
-    int mem, ssl, http;
+    int mem, ssl, h2, h1;
     if (sceNetInit()) return -1;
-    if ((mem = sceNetPoolCreate("presence", 32*1024, 0)) < 0) return -2;
+    if ((mem = sceNetPoolCreate("presence", 64*1024, 0)) < 0) return -2;
     if ((ssl = sceSslInit(256*1024)) < 0) return -3;
-    if ((http = sceHttp2Init(mem, ssl, 256*1024, 1)) < 0) return -4;
-    if ((g_tmpl = sceHttp2CreateTemplate(http, UA, 3, 1)) < 0) return -5;
+    if ((h2 = sceHttp2Init(mem, ssl, 256*1024, 1)) < 0) return -4;
+    if ((g_t2 = sceHttp2CreateTemplate(h2, UA, 3, 1)) < 0) return -5;
+    if ((h1 = sceHttpInit(mem, ssl, 256*1024)) < 0) return -6;
+    if ((g_t1 = sceHttpCreateTemplate(h1, UA, 2, 0)) < 0) return -7;
+    sceHttpsSetSslCallback(g_t1, ssl_cb, NULL);
     return 0;
 }
 
@@ -84,18 +102,32 @@ static int get_name(const char* tid, char* out, size_t n) {
     return i ? 0 : -1;
 }
 
-static int do_req(const char* method, const char* url, const char* body, char* out, size_t n) {
-    size_t bl = body ? strlen(body) : 0;
-    int req = sceHttp2CreateRequestWithURL(g_tmpl, method, url, bl);
+static int req_v2(const char* url, char* out, size_t n) {
+    int req = sceHttp2CreateRequestWithURL(g_t2, "GET", url, 0);
     if (req < 0) { snprintf(out, n, "create=%x", (unsigned)req); return -1; }
-    if (strstr(url, "discord")) sceHttp2AddRequestHeader(req, "Authorization", g_token, 0);
-    if (body) sceHttp2AddRequestHeader(req, "Content-Type", "application/json", 0);
-    int sr = sceHttp2SendRequest(req, body, bl);
-    int status = -1;
-    if (sr == 0) sceHttp2GetStatusCode(req, &status);
-    snprintf(out, n, "send=%x st=%d", (unsigned)sr, status);
+    int sr = sceHttp2SendRequest(req, NULL, 0);
+    int st = -1;
+    if (sr == 0) sceHttp2GetStatusCode(req, &st);
+    snprintf(out, n, "send=%x st=%d", (unsigned)sr, st);
     sceHttp2DeleteRequest(req);
-    return status;
+    return st;
+}
+
+static int req_v1(const char* method, const char* url, const char* body, int auth, char* out, size_t n) {
+    size_t bl = body ? strlen(body) : 0;
+    int conn = sceHttpCreateConnectionWithURL(g_t1, url, 0);
+    if (conn < 0) { snprintf(out, n, "conn=%x", (unsigned)conn); return -1; }
+    int req = sceHttpCreateRequestWithURL2(conn, method, url, bl);
+    if (req < 0) { snprintf(out, n, "req=%x", (unsigned)req); sceHttpDeleteConnection(conn); return -1; }
+    if (auth) sceHttpAddRequestHeader(req, "Authorization", g_token, 0);
+    if (body) sceHttpAddRequestHeader(req, "Content-Type", "application/json", 0);
+    int sr = sceHttpSendRequest(req, body, bl);
+    int st = -1, gs = 0x7777;
+    if (sr >= 0 && sceHttpGetStatusCode) gs = sceHttpGetStatusCode(req, &st);
+    snprintf(out, n, "send=%x gs=%x st=%d", (unsigned)sr, (unsigned)gs, st);
+    sceHttpDeleteRequest(req);
+    sceHttpDeleteConnection(conn);
+    return st;
 }
 
 static int set_status(const char* name, char* out, size_t n) {
@@ -105,7 +137,7 @@ static int set_status(const char* name, char* out, size_t n) {
                  "{\"custom_status\":{\"text\":\"Jogando %s\",\"emoji_name\":\"🎮\"}}", name);
     else
         snprintf(body, sizeof body, "{\"custom_status\":null}");
-    return do_req("PATCH", API "/settings", body, out, n);
+    return req_v1("PATCH", API "/settings", body, 1, out, n);
 }
 
 int main(void) {
@@ -113,20 +145,15 @@ int main(void) {
     int r = net_init();
     if (r) { char m[64]; snprintf(m, sizeof m, "Discord: erro de rede %d", r); notify(m); return 1; }
 
-    char rep[900] = "DIAG\n", res[120], line[200];
-
-    do_req("GET", "https://www.google.com/generate_204", NULL, res, sizeof res);
-    snprintf(line, sizeof line, "google: %s\n", res);
-    strncat(rep, line, sizeof rep - strlen(rep) - 1);
-
-    static const uint32_t flags[] = {0x1F, 0x01, 0x0F, 0x11, 0x03};
-    for (int i = 0; i < 5; i++) {
-        int rc = sceHttp2SslDisableOption ? sceHttp2SslDisableOption(g_tmpl, flags[i]) : 0x7777;
-        int st = do_req("GET", API, NULL, res, sizeof res);
-        snprintf(line, sizeof line, "f=%x rc=%x %s\n", (unsigned)flags[i], (unsigned)rc, res);
-        strncat(rep, line, sizeof rep - strlen(rep) - 1);
-        if (st > 0) break;
-    }
+    char rep[700] = "DIAG2\n", res[120], line[160];
+    req_v2("http://connectivitycheck.gstatic.com/generate_204", res, sizeof res);
+    snprintf(line, sizeof line, "v2http: %s\n", res); strncat(rep, line, sizeof rep - strlen(rep) - 1);
+    req_v1("GET", "http://connectivitycheck.gstatic.com/generate_204", NULL, 0, res, sizeof res);
+    snprintf(line, sizeof line, "v1http: %s\n", res); strncat(rep, line, sizeof rep - strlen(rep) - 1);
+    req_v1("GET", "https://www.google.com/generate_204", NULL, 0, res, sizeof res);
+    snprintf(line, sizeof line, "v1g: %s\n", res); strncat(rep, line, sizeof rep - strlen(rep) - 1);
+    req_v1("GET", API, NULL, 1, res, sizeof res);
+    snprintf(line, sizeof line, "v1d: %s\n", res); strncat(rep, line, sizeof rep - strlen(rep) - 1);
     notify(rep);
 
     char cur[32] = "";
