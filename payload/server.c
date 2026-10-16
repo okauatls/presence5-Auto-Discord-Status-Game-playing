@@ -416,6 +416,50 @@ static void list_dir(const char* path, char* out, size_t n) {
     snprintf(out + strlen(out), n - strlen(out), "]");
 }
 
+static long g_steamid = 0;
+
+static void norm(const char* s, char* o, size_t n) {
+    size_t j = 0;
+    for (size_t i = 0; s[i] && j < n - 1; i++) {
+        if (s[i] == '\\' && s[i+1] == 'u') { i += 5; continue; }
+        unsigned char c = (unsigned char)s[i];
+        if (isalnum(c)) o[j++] = (char)tolower(c);
+    }
+    o[j] = 0;
+}
+
+static int steam_url(const char* name, char* out, size_t on) {
+    char enc[400], req[800], resp[8192], want[160], got[160], raw[200];
+    out[0] = 0;
+    g_steamid = 0;
+    urlenc(name, enc, sizeof enc);
+    int n = snprintf(req, sizeof req,
+        "GET /api/storesearch/?term=%s&l=english&cc=us HTTP/1.0\r\nHost: store.steampowered.com\r\n"
+        "User-Agent: Mozilla/5.0\r\nAccept: application/json\r\n\r\n", enc);
+    https_req("store.steampowered.com", req, n, resp, sizeof resp);
+    int st = http_status(resp);
+    norm(name, want, sizeof want);
+    char* p = resp;
+    while ((p = strstr(p, "\"name\":\"")) != NULL) {
+        p += 8;
+        size_t j = 0;
+        while (*p && *p != '"' && j < sizeof raw - 2) {
+            if (*p == '\\' && p[1]) raw[j++] = *p++;
+            raw[j++] = *p++;
+        }
+        raw[j] = 0;
+        norm(raw, got, sizeof got);
+        if (*p == '"' && !strncmp(p, "\",\"id\":", 7)) {
+            long id = strtol(p + 7, NULL, 10);
+            if (id > 0 && !strcmp(got, want)) {
+                g_steamid = id;
+                snprintf(out, on, "https://cdn.cloudflare.steamstatic.com/steam/apps/%ld/library_600x900.jpg", id);
+                break;
+            }
+        }
+    }
+    return st;
+}
 static void prepare_cover(void) {
     char url[400] = "", nm[128] = "", msg[500], path[96];
     strcpy(g_cover_for, g_cur);
@@ -432,8 +476,15 @@ static void prepare_cover(void) {
     }
     if (!g_appid[0]) return;
     int wst = -1, dst = -1;
-    if (!url[0]) wst = wiki_url(g_name, url, sizeof url);
-    if (url[0]) dst = register_asset(url);
+        g_steamid = 0;
+    if (!url[0]) wst = steam_url(g_name, url, sizeof url);
+    if (url[0]) {
+        dst = register_asset(url);
+        if (!g_asset[0] && g_steamid) {
+            snprintf(url, sizeof url, "https://cdn.cloudflare.steamstatic.com/steam/apps/%ld/header.jpg", g_steamid);
+            dst = register_asset(url);
+        }
+    }
     snprintf(msg, sizeof msg, "Capa %s: wiki=%d discord=%d %s", g_name, wst, dst, g_asset[0] ? "ok" : "sem capa");
     notify(msg);
 }
