@@ -386,7 +386,7 @@ static int load_override(const char* tid, char* url, size_t un, char* name, size
         char* bar = strchr(line, '|');
         if (!bar) continue;
         *bar = 0;
-        if (strcmp(line, tid)) continue;
+        if (strcmp(line, tid) && strcmp(line, g_name)) continue;
         char* u = bar + 1;
         char* bar2 = strchr(u, '|');
         if (bar2) {
