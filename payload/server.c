@@ -557,7 +557,7 @@ static void prepare_cover(void) {
     if (!g_appid[0]) return;
     int wst = -1, dst = -1;
         g_steamid = 0;
-    if (!url[0]) wst =     if (!url[0]) wst = steam_url2(g_name, url, sizeof url);
+        if (!url[0]) wst = steam_url2(g_name, url, sizeof url);
     if (url[0]) {
         dst = register_asset(url);
         if (!g_asset[0] && g_steamid) {
