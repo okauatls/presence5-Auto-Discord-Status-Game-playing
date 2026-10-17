@@ -36,7 +36,7 @@ int sceNetResolverDestroy(int) __attribute__((weak));
 #define GW "gateway.discord.gg"
 
 static char g_token[256], g_cur[32], g_name[128], g_last[160];
-static char g_appid[40], g_asset[320], g_cover_for[32];
+static char g_appid[40], g_asset[480], g_cover_for[32];
 static time_t g_start;
 static int g_fd = -1, g_err = 0, g_to = 200, g_pool = -1, g_inited = 0;
 static mbedtls_ssl_context ssl;
@@ -97,18 +97,20 @@ static int read_appid(void) {
     fclose(f);
     size_t n = strlen(g_appid);
     while (n && (g_appid[n-1] < '0' || g_appid[n-1] > '9')) g_appid[--n] = 0;
-    return n >= 15 ? 0 : (g_appid[0] = 0, -1);
+    if (n < 15) { g_appid[0] = 0; return -1; }
+    return 0;
 }
 
 static int get_name_json(const char* tid, char* out, size_t n) {
-        static char buf[65536]; char path[128];
+    static char buf[65536];
+    char path[128];
     snprintf(path, sizeof path, "/user/appmeta/%s/param.json", tid);
     FILE* f = fopen(path, "rb");
     if (!f) return -1;
     size_t len = fread(buf, 1, sizeof buf - 1, f);
     fclose(f);
     buf[len] = 0;
-        char* p = NULL;
+    char* p = NULL;
     {
         static const char* langs[] = {"\"en-US\"", "\"en-GB\""};
         for (int li = 0; li < 2 && !p; li++) {
@@ -175,6 +177,7 @@ static int get_name(const char* tid, char* out, size_t n) {
     if (get_name_json(tid, out, n) == 0) return 0;
     return get_name_sfo(tid, out, n);
 }
+
 static void poll_game(void) {
     char seen[32] = "";
     int id = sceSystemServiceGetAppIdOfRunningBigApp();
@@ -300,7 +303,6 @@ static int rd(unsigned char* b, size_t n, int ms) {
     return 1;
 }
 
-/* requisicao HTTPS simples (HTTP/1.0, resposta ate fechar a conexao) */
 static int https_req(const char* host, const char* req, size_t rl, char* resp, size_t rsz) {
     resp[0] = 0;
     if (tcp_open(host)) return -1;
@@ -342,31 +344,18 @@ static void urlenc(const char* s, char* o, size_t n) {
     o[j] = 0;
 }
 
-static int wiki_url(const char* name, char* out, size_t on) {
-    char q[300], enc[400], req[800], resp[6144];
-    out[0] = 0;
-    snprintf(q, sizeof q, "%s video game", name);
-    urlenc(q, enc, sizeof enc);
-    int n = snprintf(req, sizeof req,
-        "GET /w/api.php?action=query&generator=search&gsrsearch=%s&gsrlimit=1&prop=pageimages&piprop=thumbnail&pithumbsize=512&format=json HTTP/1.0\r\n"
-        "Host: en.wikipedia.org\r\nUser-Agent: ps5-presence/1.0\r\nAccept: application/json\r\n\r\n", enc);
-    https_req("en.wikipedia.org", req, n, resp, sizeof resp);
-    int st = http_status(resp);
-    char* p = strstr(resp, "\"source\":\"");
-    if (p) {
-        p += 10;
-        size_t j = 0;
-        while (*p && *p != '"' && j < on - 1) {
-            if (*p == '\\' && p[1] == '/') p++;
-            out[j++] = *p++;
-        }
-        out[j] = 0;
+static void norm(const char* s, char* o, size_t n) {
+    size_t j = 0;
+    for (size_t i = 0; s[i] && j < n - 1; i++) {
+        if (s[i] == '\\' && s[i+1] == 'u') { i += 5; continue; }
+        unsigned char c = (unsigned char)s[i];
+        if (isalnum(c)) o[j++] = (char)tolower(c);
     }
-    return st;
+    o[j] = 0;
 }
 
 static int register_asset(const char* url) {
-    char body[600], req[1300], resp[3000];
+    char body[700], req[1500], resp[3000];
     g_asset[0] = 0;
     int bl = snprintf(body, sizeof body, "{\"urls\":[\"%s\"]}", url);
     int n = snprintf(req, sizeof req,
@@ -397,7 +386,7 @@ static int load_override(const char* tid, char* url, size_t un, char* name, size
         char* bar = strchr(line, '|');
         if (!bar) continue;
         *bar = 0;
-                if (strcmp(line, tid) && strcmp(line, g_name)) continue;
+        if (strcmp(line, tid)) continue;
         char* u = bar + 1;
         char* bar2 = strchr(u, '|');
         if (bar2) {
@@ -429,65 +418,6 @@ static void list_dir(const char* path, char* out, size_t n) {
     snprintf(out + strlen(out), n - strlen(out), "]");
 }
 
-static long g_steamid = 0;
-
-static void norm(const char* s, char* o, size_t n) {
-    size_t j = 0;
-    for (size_t i = 0; s[i] && j < n - 1; i++) {
-        if (s[i] == '\\' && s[i+1] == 'u') { i += 5; continue; }
-        unsigned char c = (unsigned char)s[i];
-        if (isalnum(c)) o[j++] = (char)tolower(c);
-    }
-    o[j] = 0;
-}
-
-static int steam_url(const char* name, char* out, size_t on) {
-    char enc[400], req[800], resp[8192], want[160], got[160], raw[200];
-    out[0] = 0;
-    g_steamid = 0;
-    urlenc(name, enc, sizeof enc);
-    int n = snprintf(req, sizeof req,
-        "GET /api/storesearch/?term=%s&l=english&cc=us HTTP/1.0\r\nHost: store.steampowered.com\r\n"
-        "User-Agent: Mozilla/5.0\r\nAccept: application/json\r\n\r\n", enc);
-    https_req("store.steampowered.com", req, n, resp, sizeof resp);
-    int st = http_status(resp);
-    norm(name, want, sizeof want);
-    char* p = resp;
-    while ((p = strstr(p, "\"name\":\"")) != NULL) {
-        p += 8;
-        size_t j = 0;
-        while (*p && *p != '"' && j < sizeof raw - 2) {
-            if (*p == '\\' && p[1]) raw[j++] = *p++;
-            raw[j++] = *p++;
-        }
-        raw[j] = 0;
-        norm(raw, got, sizeof got);
-        if (*p == '"' && !strncmp(p, "\",\"id\":", 7)) {
-            long id = strtol(p + 7, NULL, 10);
-            if (id > 0 && !strcmp(got, want)) {
-                g_steamid = id;
-                snprintf(out, on, "https://cdn.cloudflare.steamstatic.com/steam/apps/%ld/library_600x900.jpg", id);
-                break;
-            }
-        }
-    }
-    return st;
-}
-static int url_ok(const char* url) {
-    if (strncmp(url, "https://", 8)) return 0;
-    char host[100], req[900];
-    const char* h = url + 8;
-    const char* sl = strchr(h, '/');
-    if (!sl) return 0;
-    size_t hl = (size_t)(sl - h);
-    if (hl >= sizeof host) return 0;
-    memcpy(host, h, hl);
-    host[hl] = 0;
-    int n = snprintf(req, sizeof req, "HEAD %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: Mozilla/5.0\r\n\r\n", sl, host);
-    static char resp[2048];
-    https_req(host, req, n, resp, sizeof resp);
-    return http_status(resp) == 200;
-}
 static int g_last_st = 0;
 static char g_cdbg[96];
 
@@ -515,7 +445,6 @@ static int steam_url2(const char* name, char* out, size_t on) {
     static char big[300000];
     char enc[400], req[800], want[160], got[160], raw[200], cand[512];
     out[0] = 0;
-    g_steamid = 0;
     urlenc(name, enc, sizeof enc);
     int n = snprintf(req, sizeof req,
         "GET /api/storesearch/?term=%s&l=english&cc=us HTTP/1.0\r\nHost: store.steampowered.com\r\n"
@@ -576,12 +505,11 @@ static int steam_url2(const char* name, char* out, size_t on) {
 
     snprintf(g_cdbg, sizeof g_cdbg, "id=%ld lib=%d det=%d hdr=%d", id, sa, sb, sc);
     notify(g_cdbg);
-    g_steamid = 0;
     return st;
 }
 
 static void prepare_cover(void) {
-    char url[400] = "", nm[128] = "", msg[500], path[96];
+    char url[512] = "", nm[128] = "", msg[600], path[96];
     strcpy(g_cover_for, g_cur);
     g_asset[0] = 0;
     int ov = load_override(g_cur, url, sizeof url, nm, sizeof nm);
@@ -596,16 +524,10 @@ static void prepare_cover(void) {
     }
     if (!g_appid[0]) return;
     int wst = -1, dst = -1;
-        g_steamid = 0;
-        if (!url[0]) wst = steam_url2(g_name, url, sizeof url);
-    if (url[0]) {
-        dst = register_asset(url);
-        if (!g_asset[0] && g_steamid) {
-            snprintf(url, sizeof url, "https://cdn.cloudflare.steamstatic.com/steam/apps/%ld/header.jpg", g_steamid);
-            dst = register_asset(url);
-        }
-    }
-            snprintf(msg, sizeof msg, "Capa %s [%s]: busca=%d discord=%d %s ...%s", g_name, g_cur, wst, dst, g_asset[0] ? "ok" : "sem capa", strlen(url) > 28 ? url + strlen(url) - 28 : url);
+    if (!url[0]) wst = steam_url2(g_name, url, sizeof url);
+    if (url[0]) dst = register_asset(url);
+    snprintf(msg, sizeof msg, "Capa %s [%s]: busca=%d discord=%d %s ...%s", g_name, g_cur, wst, dst,
+             g_asset[0] ? "ok" : "sem capa", strlen(url) > 28 ? url + strlen(url) - 28 : url);
     notify(msg);
 }
 
@@ -686,14 +608,14 @@ static void act_json(char* out, size_t n) {
 }
 
 static int send_presence(void) {
-    char a[900], b[1300];
+    char a[1000], b[1400];
     act_json(a, sizeof a);
     snprintf(b, sizeof b, "{\"op\":3,\"d\":{\"since\":0,\"activities\":%s,\"status\":\"online\",\"afk\":false}}", a);
     return ws_send(1, b, strlen(b));
 }
 
 static int send_identify(void) {
-    char a[900], b[2200];
+    char a[1000], b[2400];
     act_json(a, sizeof a);
     snprintf(b, sizeof b,
         "{\"op\":2,\"d\":{\"token\":\"%s\",\"properties\":{\"os\":\"Windows\",\"browser\":\"Chrome\",\"device\":\"\"},"
