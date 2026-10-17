@@ -488,10 +488,32 @@ static int url_ok(const char* url) {
     https_req(host, req, n, resp, sizeof resp);
     return http_status(resp) == 200;
 }
+static int g_last_st = 0;
+static char g_cdbg[96];
+
+static int url_ok(const char* url) {
+    g_last_st = -1;
+    if (strncmp(url, "https://", 8)) return 0;
+    char host[100], req[1000];
+    const char* h = url + 8;
+    const char* sl = strchr(h, '/');
+    if (!sl) return 0;
+    size_t hl = (size_t)(sl - h);
+    if (hl >= sizeof host) return 0;
+    memcpy(host, h, hl);
+    host[hl] = 0;
+    int n = snprintf(req, sizeof req,
+        "GET %s HTTP/1.0\r\nHost: %s\r\nRange: bytes=0-0\r\nUser-Agent: Mozilla/5.0\r\n\r\n", sl, host);
+    static char resp[1024];
+    https_req(host, req, n, resp, sizeof resp);
+    g_last_st = http_status(resp);
+    return g_last_st == 200 || g_last_st == 206;
+}
 
 static int steam_url2(const char* name, char* out, size_t on) {
     static char resp[40000];
-    char enc[400], req[800], want[160], got[160], raw[200];
+    static char big[300000];
+    char enc[400], req[800], want[160], got[160], raw[200], cand[512];
     out[0] = 0;
     g_steamid = 0;
     urlenc(name, enc, sizeof enc);
@@ -501,6 +523,7 @@ static int steam_url2(const char* name, char* out, size_t on) {
     https_req("store.steampowered.com", req, n, resp, sizeof resp);
     int st = http_status(resp);
     norm(name, want, sizeof want);
+    long id = 0;
     char* p = resp;
     while ((p = strstr(p, "\"name\":\"")) != NULL) {
         p += 8;
@@ -514,27 +537,49 @@ static int steam_url2(const char* name, char* out, size_t on) {
         if (strcmp(got, want)) continue;
         char* nx = strstr(p, "\"name\":\"");
         char* idp = strstr(p, "\"id\":");
-        char* ti = strstr(p, "\"tiny_image\":\"");
-        if (idp && (!nx || idp < nx)) g_steamid = strtol(idp + 5, NULL, 10);
-        if (!ti || (nx && ti > nx)) break;
-        ti += 14;
-        char base[300];
-        size_t k = 0;
-        while (*ti && *ti != '"' && *ti != '?' && k < sizeof base - 2) {
-            if (*ti == '\\' && ti[1] == '/') ti++;
-            base[k++] = *ti++;
-        }
-        base[k] = 0;
-        char* ls = strrchr(base, '/');
-        if (!ls) break;
-        ls[1] = 0;
-                snprintf(out, on, "%s%s", base, "header.jpg");
+        if (idp && (!nx || idp < nx)) id = strtol(idp + 5, NULL, 10);
         break;
     }
-    if (!out[0] && g_steamid)
-        snprintf(out, on, "https://cdn.cloudflare.steamstatic.com/steam/apps/%ld/header.jpg", g_steamid);
+    if (id <= 0) return st;
+
+    int sa = 0, sb = 0, sc = 0;
+    snprintf(cand, sizeof cand, "https://cdn.cloudflare.steamstatic.com/steam/apps/%ld/library_600x900.jpg", id);
+    if (url_ok(cand)) snprintf(out, on, "%s", cand);
+    sa = g_last_st;
+
+    if (!out[0]) {
+        n = snprintf(req, sizeof req,
+            "GET /api/appdetails?appids=%ld&filters=basic&l=english&cc=us HTTP/1.0\r\nHost: store.steampowered.com\r\n"
+            "User-Agent: Mozilla/5.0\r\n\r\n", id);
+        https_req("store.steampowered.com", req, n, big, sizeof big);
+        char* h = strstr(big, "\"header_image\":\"");
+        if (h) {
+            h += 16;
+            size_t k = 0;
+            while (*h && *h != '"' && k < sizeof cand - 2) {
+                if (*h == '\\' && h[1] == '/') h++;
+                cand[k++] = *h++;
+            }
+            cand[k] = 0;
+            if (url_ok(cand)) snprintf(out, on, "%s", cand);
+            sb = g_last_st;
+        } else {
+            sb = -1;
+        }
+    }
+
+    if (!out[0]) {
+        snprintf(cand, sizeof cand, "https://cdn.cloudflare.steamstatic.com/steam/apps/%ld/header.jpg", id);
+        if (url_ok(cand)) snprintf(out, on, "%s", cand);
+        sc = g_last_st;
+    }
+
+    snprintf(g_cdbg, sizeof g_cdbg, "id=%ld lib=%d det=%d hdr=%d", id, sa, sb, sc);
+    notify(g_cdbg);
+    g_steamid = 0;
     return st;
 }
+
 static void prepare_cover(void) {
     char url[400] = "", nm[128] = "", msg[500], path[96];
     strcpy(g_cover_for, g_cur);
