@@ -528,12 +528,7 @@ static int steam_url2(const char* name, char* out, size_t on) {
         char* ls = strrchr(base, '/');
         if (!ls) break;
         ls[1] = 0;
-        static const char* files[] = {"library_600x900.jpg", "header.jpg", "capsule_616x353.jpg"};
-        for (int i = 0; i < 3; i++) {
-            char cand[420];
-            snprintf(cand, sizeof cand, "%s%s", base, files[i]);
-            if (url_ok(cand)) { snprintf(out, on, "%s", cand); break; }
-        }
+                snprintf(out, on, "%s%s", base, "header.jpg");
         break;
     }
     if (!out[0] && g_steamid)
