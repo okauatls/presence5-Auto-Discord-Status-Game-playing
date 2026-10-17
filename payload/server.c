@@ -397,7 +397,7 @@ static int load_override(const char* tid, char* url, size_t un, char* name, size
         char* bar = strchr(line, '|');
         if (!bar) continue;
         *bar = 0;
-        if (strcmp(line, tid)) continue;
+                if (strcmp(line, tid) && strcmp(line, g_name)) continue;
         char* u = bar + 1;
         char* bar2 = strchr(u, '|');
         if (bar2) {
@@ -565,7 +565,7 @@ static void prepare_cover(void) {
             dst = register_asset(url);
         }
     }
-    snprintf(msg, sizeof msg, "Capa %s: wiki=%d discord=%d %s", g_name, wst, dst, g_asset[0] ? "ok" : "sem capa");
+        snprintf(msg, sizeof msg, "Capa %s [%s]: busca=%d discord=%d %s", g_name, g_cur, wst, dst, g_asset[0] ? "ok" : "sem capa");
     notify(msg);
 }
 
