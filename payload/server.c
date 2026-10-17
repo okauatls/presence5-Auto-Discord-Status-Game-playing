@@ -101,14 +101,27 @@ static int read_appid(void) {
 }
 
 static int get_name_json(const char* tid, char* out, size_t n) {
-    char path[128], buf[16384];
+        static char buf[65536]; char path[128];
     snprintf(path, sizeof path, "/user/appmeta/%s/param.json", tid);
     FILE* f = fopen(path, "rb");
     if (!f) return -1;
     size_t len = fread(buf, 1, sizeof buf - 1, f);
     fclose(f);
     buf[len] = 0;
-    char* p = strstr(buf, "\"titleName\"");
+        char* p = NULL;
+    {
+        static const char* langs[] = {"\"en-US\"", "\"en-GB\""};
+        for (int li = 0; li < 2 && !p; li++) {
+            char* k = buf;
+            while ((k = strstr(k, langs[li])) != NULL) {
+                char* e = k + strlen(langs[li]);
+                while (*e == ' ' || *e == '\n' || *e == '\r' || *e == '\t') e++;
+                if (*e == ':') { p = strstr(e, "\"titleName\""); break; }
+                k = e;
+            }
+        }
+        if (!p) p = strstr(buf, "\"titleName\"");
+    }
     if (!p) return -1;
     p = strchr(p + 11, ':');
     if (!p) return -1;
@@ -460,6 +473,73 @@ static int steam_url(const char* name, char* out, size_t on) {
     }
     return st;
 }
+static int url_ok(const char* url) {
+    if (strncmp(url, "https://", 8)) return 0;
+    char host[100], req[900];
+    const char* h = url + 8;
+    const char* sl = strchr(h, '/');
+    if (!sl) return 0;
+    size_t hl = (size_t)(sl - h);
+    if (hl >= sizeof host) return 0;
+    memcpy(host, h, hl);
+    host[hl] = 0;
+    int n = snprintf(req, sizeof req, "HEAD %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: Mozilla/5.0\r\n\r\n", sl, host);
+    static char resp[2048];
+    https_req(host, req, n, resp, sizeof resp);
+    return http_status(resp) == 200;
+}
+
+static int steam_url2(const char* name, char* out, size_t on) {
+    static char resp[40000];
+    char enc[400], req[800], want[160], got[160], raw[200];
+    out[0] = 0;
+    g_steamid = 0;
+    urlenc(name, enc, sizeof enc);
+    int n = snprintf(req, sizeof req,
+        "GET /api/storesearch/?term=%s&l=english&cc=us HTTP/1.0\r\nHost: store.steampowered.com\r\n"
+        "User-Agent: Mozilla/5.0\r\nAccept: application/json\r\n\r\n", enc);
+    https_req("store.steampowered.com", req, n, resp, sizeof resp);
+    int st = http_status(resp);
+    norm(name, want, sizeof want);
+    char* p = resp;
+    while ((p = strstr(p, "\"name\":\"")) != NULL) {
+        p += 8;
+        size_t j = 0;
+        while (*p && *p != '"' && j < sizeof raw - 2) {
+            if (*p == '\\' && p[1]) raw[j++] = *p++;
+            raw[j++] = *p++;
+        }
+        raw[j] = 0;
+        norm(raw, got, sizeof got);
+        if (strcmp(got, want)) continue;
+        char* nx = strstr(p, "\"name\":\"");
+        char* idp = strstr(p, "\"id\":");
+        char* ti = strstr(p, "\"tiny_image\":\"");
+        if (idp && (!nx || idp < nx)) g_steamid = strtol(idp + 5, NULL, 10);
+        if (!ti || (nx && ti > nx)) break;
+        ti += 14;
+        char base[300];
+        size_t k = 0;
+        while (*ti && *ti != '"' && *ti != '?' && k < sizeof base - 2) {
+            if (*ti == '\\' && ti[1] == '/') ti++;
+            base[k++] = *ti++;
+        }
+        base[k] = 0;
+        char* ls = strrchr(base, '/');
+        if (!ls) break;
+        ls[1] = 0;
+        static const char* files[] = {"library_600x900.jpg", "header.jpg", "capsule_616x353.jpg"};
+        for (int i = 0; i < 3; i++) {
+            char cand[420];
+            snprintf(cand, sizeof cand, "%s%s", base, files[i]);
+            if (url_ok(cand)) { snprintf(out, on, "%s", cand); break; }
+        }
+        break;
+    }
+    if (!out[0] && g_steamid)
+        snprintf(out, on, "https://cdn.cloudflare.steamstatic.com/steam/apps/%ld/header.jpg", g_steamid);
+    return st;
+}
 static void prepare_cover(void) {
     char url[400] = "", nm[128] = "", msg[500], path[96];
     strcpy(g_cover_for, g_cur);
@@ -477,7 +557,7 @@ static void prepare_cover(void) {
     if (!g_appid[0]) return;
     int wst = -1, dst = -1;
         g_steamid = 0;
-    if (!url[0]) wst = steam_url(g_name, url, sizeof url);
+    if (!url[0]) wst =     if (!url[0]) wst = steam_url2(g_name, url, sizeof url);
     if (url[0]) {
         dst = register_asset(url);
         if (!g_asset[0] && g_steamid) {
