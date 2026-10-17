@@ -565,7 +565,7 @@ static void prepare_cover(void) {
             dst = register_asset(url);
         }
     }
-        snprintf(msg, sizeof msg, "Capa %s [%s]: busca=%d discord=%d %s", g_name, g_cur, wst, dst, g_asset[0] ? "ok" : "sem capa");
+            snprintf(msg, sizeof msg, "Capa %s [%s]: busca=%d discord=%d %s ...%s", g_name, g_cur, wst, dst, g_asset[0] ? "ok" : "sem capa", strlen(url) > 28 ? url + strlen(url) - 28 : url);
     notify(msg);
 }
 
